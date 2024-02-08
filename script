@@ -1,0 +1,625 @@
+@load base/frameworks/logging
+@load base/protocols/conn
+@load base/protocols/http
+@load base/protocols/ftp
+@load base/packet-protocols/ip
+
+module UNSW_NB15;
+
+# The TTLStats record is designed to track Time To Live (TTL) statistics for network connections.
+# It's useful for analyzing patterns and detecting anomalies in the TTL values across connections.
+type TTLStats: record 
+{
+    sum_ttl: double &default=0.0;   # The sum of all TTL values observed, allowing for the computation of the average TTL.
+    packets: count &default=0;      # The number of TTL values included in the sum, used to calculate the average TTL.
+    average: double &default=0.0;    # The average TTL value, computed as the sum of TTLs divided by the count of TTL values.
+};
+
+export 
+{
+    redef enum Log::ID += { LOG_UNSW_NB15 };
+    # The Info data structure is designed to align with the structure of the UNSW-NB15 network dataset.
+    type Info: record 
+    {
+        srcip: addr &log &default=0.0.0.0;                                             # Source IP Address
+        srcport: port &log &default=count_to_port(0,unknown_transport);     # Source Port Number
+        dstip: addr &log &default=0.0.0.0;				                               # Destination IP Address
+        dstport: port &log &default=count_to_port(0,unknown_transport);     # Destination Port Number
+        proto: transport_proto &log &default=unknown_transport;                        # Transaction Protocol
+        state: string &log &default=" - ";		# Connection state
+        dur: double &log &default=0.0;			# Record total duration 
+        sbytes: count &log &default=0;			# Source to destination transaction bytes
+        dbytes: count &log &default=0;			# Destination to source transaction bytes
+        sttl: count &log &default=0;			# Source to destination time to live value
+        dttl: count &log &default=0;			# Destination to source time to live value
+        state_ttl_stats: table[string] of TTLStats; # key: state | value: TTLStats for this connection according to 'state'
+        state_ttl_mean: table[string] of double; # key: state | value: TTL mean for the last 100 connection according to 'state'
+        sloss: count &log &default=0;			# Source packets retransmitted or dropped
+        dloss: count &log &default=0;			# Destination packets retransmitted or dropped
+        service: string &log &optional &default=" - ";	# Service type
+        sload: double &log &default=0.0;		# Source bits per second
+        dload: double &log &default=0.0;		# Destination bits per second
+        spkts: count &log &default=0;			# Source to destination packet count
+        dpkts: count &log &default=0;			# Destination to source packet count
+        swin: count &log &default=0;			# Source TCP window advertisement value
+        dwin: count &log &default=0;			# Destination TCP window advertisement
+        stcpb: count &log &default=0;			# Source TCP base sequence number
+        dtcpb: count &log &default=0;			# Destination TCP base sequence number
+        smeansz: count &log &default=0;			# Mean of the flow packet size transmitted by the src
+        dmeansz: count &log &default=0;			# Mean of the flow packet size transmitted by the dst
+        trans_depth: count &log &default=0;		# Represents the pipelined depth into the connection of HTTP request/response transaction
+        res_bdy_len: count &log &default=0;		# Actual uncompressed content size of the data transferred from the server's HTTP service
+        last_pkt_time_src: time &optional; 		# Last packet timestamp for source (no log)
+        last_pkt_time_dst: time &optional;	 	# Last packet timestamp for destination (no log)
+    	sjit: double &log &default=0.0;         # Source jitter in mSec
+  	    djit: double &log &default=0.0;         # Destination jitter in mSec
+  	    stime: time &log &default=double_to_time(0.0);          # Record start time
+  	    ltime: time &log &default=double_to_time(0.0); 			# Record last time
+  	    sintpkt_sum: interval &optional; 		# Sum of time differences between consecutive packets for the source
+        dintpkt_sum: interval &optional;	 	# Sum of time differences between consecutive packets for the destination
+	    sintpkt_count: count &optional;			# Packet counter for the source
+        dintpkt_count: count &optional;		  	# Packet counter for the destination
+  	    sintpkt: double &log &default=0.0;      # Source interpacket arrival time in mSec
+  	    dintpkt: double &log &default=0.0;      # Destination interpacket arrival time in mSec
+        syn_timestamp: time &optional;			# Timestamp of the SYN packet (no log)
+        synack_timestamp: time &optional;		# Timestamp of the SYN/ACK packet (no log)
+        tcprtt: double &log &default=0.0;		# TCP connection setup round-trip time, the sum of ’synack’ and ’ackdat’
+        synack: double &log &default=0.0;		# TCP connection setup time, the time between the SYN and the SYN_ACK packets
+        ackdat: double &log &default=0.0;		# TCP connection setup time, the time between the SYN_ACK and the ACK packets
+        is_sm_ips_ports: bool &log &default=F;	# If source equals to destination IP addresses and port numbers are equal
+  	    ct_state_ttl: count &log &default=0;    # No. for each state according to specific range of values for source/destination time to live
+        flw_http_mthd: count &default=0;        # No. of flows that has methods such as Get and Post in http service
+        ct_flw_http_mthd: count &log &default=0;# No. of flows that has methods such as Get and Post in HTTP service (in 100 connections according to the last time)
+        is_ftp_login: bool &log &default=F;		# If the FTP session is accessed by user and password then T else F
+  	    ftp_cmd: count &default=0;		        # No. of flows that has a command in FTP session
+        ct_ftp_cmd: count &log &default=0;		# No. of flows that has a command in FTP session (in 100 connections according to the last time)
+  	    ct_srv_src: count &log &default=0;		# No. of connections that contain the same service and source address in 100 connections according to the last time
+  	    ct_srv_dst: count &log &default=0;		# No. of connections that contain the same service and destination address in 100 connections according to the last time
+  	    ct_dst_ltm: count &log &default=0;		# No. of connections of the same destination address in 100 connections according to the last time
+  	    ct_src_ltm: count &log &default=0;		# No. of connections of the same source address in 100 connections according to the last time
+  	    ct_src_dport_ltm: count &log &default=0;# No of connections of the same source address and the destination port in 100 connections according to the last time
+  	    ct_dst_sport_ltm: count &log &default=0;# No of connections of the same destination address and the source port in 100 connections according to the last time
+  	    ct_dst_src_ltm: count &log &default=0;	# No of connections of the same source and the destination address in 100 connections according to the last time
+    };
+}
+
+# DEFINITION OF GLOBAL VARIABLES
+
+# Global table mapping each uid (globally unique connection identifier) to its corresponding Info record.
+global connection_infos: table[string] of Info; 
+# Stores the uids of the last connections      
+global last_connections: vector of string = vector();
+
+# Definition of constants  
+global TTL_LOW = 30;  # Threshold for considering a TTL as low
+global TTL_HIGH = 100; # Threshold for considering a TTL as high
+global MAX_RECENT_CONNECTIONS = 100; # Lenght of queue with the recent connection's uid
+
+global TOLERANCE_THRESHOLD_PERCENTAGE: double = 30.0;   # Defines the acceptable deviation percentage from the average Time-To-Live (TTL) value for each connection state.
+# This tolerance threshold is crucial for dynamically determining anomalous TTL values that deviate significantly from the expected range.
+
+
+# FUNCTION DEFINITIONS
+
+# This function checks if a connection with the given uid already exists in the global connection information table
+function check_uid(uid: string): bool
+{
+    if (uid in connection_infos)
+        return T;
+        else 
+            return F;
+}
+
+# This function updates the basic connection information in the global connection_infos table, if an entry with the given uid already exists in the table. 
+function extract_basic_info(uid: string, c: connection)
+{
+    connection_infos[uid]$srcip = c$id$orig_h;      # Update source IP address
+    connection_infos[uid]$srcport = c$id$orig_p;    # Update source port number
+    connection_infos[uid]$dstip = c$id$resp_h;      # Update destination IP address
+    connection_infos[uid]$dstport = c$id$resp_p;    # Update destination port number
+    connection_infos[uid]$stime = c$start_time;     # Update connection start time
+}
+
+# Function that returns True if the packet p was sent from the source endpoint of the connection c
+function is_source(p: pkt_hdr, c: connection) : bool
+{
+    return p$ip$src == c$id$orig_h;
+}
+  
+# This function updates the packet-related features (window size, sequence number) in the global connection information table
+function update_packet_features(uid: string, p: pkt_hdr, is_src: bool)
+{
+    if (p?$tcp)   # Check if tcp record exists in current packet header
+    {
+        if (is_src)         # If the packet is from the source, update source-related fields. 
+        {  
+            connection_infos[uid]$swin = p$tcp$win;  # Update source TCP window size
+            connection_infos[uid]$stcpb = p$tcp$seq;  # Update source TCP sequence number
+        } 
+        else                # If the packet is from the destination, update destination-related fields.
+        {
+            connection_infos[uid]$dwin = p$tcp$win;  # Update destination TCP window size
+            connection_infos[uid]$dtcpb = p$tcp$seq;  # Update destination TCP sequence number
+        }   
+    }    
+}
+
+# This function updates the state of a TCP transport protocol connection based on the current state and TCP flags
+function update_tcp_state(uid: string, flags: string)
+{
+    if (connection_infos[uid]?$state)  # Checks if the state of the current connection exists 
+    {
+        local current_state = connection_infos[uid]$state;  # Retrieves the last recorded state
+
+        # Checks on flags
+        if ("R" in flags) 
+        {
+            # RST packet - connection reset
+            connection_infos[uid]$state = "RST";  # Connection reset
+        }
+        else if ("S" in flags && !("A" in flags) && current_state == " - ") 
+        {
+            # SYN packet without ACK - start of the connection (connection request)
+            connection_infos[uid]$state = "REQ";  # Connection requested
+        } 
+        else if ("F" in flags && "A" in flags && (current_state == "CON" || current_state == "PAR")) 
+        {
+            # FIN + ACK - confirmed connection closure
+            connection_infos[uid]$state = "FIN";  # Connection closing
+        } 
+        else if ("P" in flags && "A" in flags && current_state == "CON") 
+        {
+            # PSH + ACK - data transmitted and confirmed
+            connection_infos[uid]$state = "TXD";  # Data transmitted
+        } 
+        else if ("A" in flags && (current_state == "REQ" || current_state == "PAR" || current_state == "CON")) 
+        {
+            # ACK packet - confirmation of received data or established connection
+            connection_infos[uid]$state = "CON";  # Connection established
+        } 
+    }
+     else 
+        print ("Error updating TCP state...");
+}
+
+# This function updates the state of a connection with UDP transport protocol based on current activity
+function update_udp_state(uid: string, is_orig: bool)
+{
+    if (connection_infos[uid]?$state)
+    {
+        local current_state = connection_infos[uid]$state;  # Retrieves the last recorded state
+
+        # If the current state is initial, update the state to REQ or RPL depending on who sent the packet.
+        # If it's already CON, it remains CON.
+        if (current_state == " - ") 
+        {
+            if (is_orig) 
+                connection_infos[uid]$state = "REQ";  # Request sent by the originator
+            else 
+                connection_infos[uid]$state = "RPL";  # Reply sent by the responder
+        } 
+        else 
+            if ((current_state == "REQ" && !is_orig) || (current_state == "RPL" && is_orig)) 
+                connection_infos[uid]$state = "CON";  # Connection established (bidirectional exchange)
+            else
+                connection_infos[uid]$state = current_state;  # Maintain the current state if already CON or in the absence of valid state transitions.
+    }
+    else 
+        print ("Error updating UDP state...");
+}
+
+# Function to update TTL statistics for a specific connection state
+function update_ttl_stats(state: string, new_ttl: count, uid: string)
+{
+    # Initialize statistics for the state if they don't exist
+    if (state !in connection_infos[uid]$state_ttl_stats)
+    {
+        connection_infos[uid]$state_ttl_stats[state] = TTLStats($sum_ttl=0.0, $packets=0, $average=0.0);
+    }
+
+    # Update sum_ttl and count
+    connection_infos[uid]$state_ttl_stats[state]$sum_ttl += new_ttl;
+    connection_infos[uid]$state_ttl_stats[state]$packets += 1;
+
+    # Recalculate the average
+    connection_infos[uid]$state_ttl_stats[state]$average = connection_infos[uid]$state_ttl_stats[state]$sum_ttl / connection_infos[uid]$state_ttl_stats[state]$packets;
+}
+
+# Calculates connection-based features for a given connection (uid) and manages a buffer of the latest MAX_RECENT_CONNECTIONS connections.
+# It updates the buffer with the new connection, removes the oldest one if exceeding MAX_RECENT_CONNECTIONS, and iterates over the buffer
+# to count matching properties (e.g., IPs, services, ports) among connections.
+function calculate_connection_features(uid: string)
+{
+    # Update the buffer with the new connection
+    last_connections[|last_connections|] = uid;
+
+    # If we exceed the maximum number of recent connections, remove the oldest one
+    if (|last_connections| > MAX_RECENT_CONNECTIONS)
+    {
+        # Remove the oldest connection from connection_infos
+        delete connection_infos[last_connections[0]];
+        # Adjust the buffer by removing the oldest connection
+        last_connections = last_connections[1:];
+    }
+
+    # Initialize counters for each feature
+    local ct_srv_src = 0;
+    local ct_srv_dst = 0;
+    local ct_dst_ltm = 0;
+    local ct_src_ltm = 0;
+    local ct_src_dport_ltm = 0;
+    local ct_dst_sport_ltm = 0;
+    local ct_dst_src_ltm = 0;
+    local ct_flw_http_mthd = 0;
+    local ct_ftp_cmd = 0;
+
+    # Initialize accumulators to calculate the average TTL values per state
+    local state_ttl_sums: table[string] of double = table();
+
+    # Iterate over all uids in last_connections
+    for (idx1 in last_connections)
+    {
+        local uid1 = last_connections[idx1];
+        local srcip1 = connection_infos[uid1]$srcip;
+        local service1 = connection_infos[uid1]$service;
+        local dstip1 = connection_infos[uid1]$dstip;
+        local dstport1 = connection_infos[uid1]$dstport;
+        local srcport1 = connection_infos[uid1]$srcport;
+
+        # Aggregate the average TTL values per state
+        for (state, stats in connection_infos[uid1]$state_ttl_stats)
+        {
+            if (state !in state_ttl_sums)
+                state_ttl_sums[state] = 0.0;  # Initialize if not exist
+            state_ttl_sums[state] += stats$average;
+        }
+
+        # Aggregate the values for HTTP methods and FTP commands
+        ct_flw_http_mthd += connection_infos[uid1]$flw_http_mthd;
+        ct_ftp_cmd += connection_infos[uid1]$ftp_cmd;
+
+        for (idx2 in last_connections)
+        {
+            if (idx2 > idx1)    # avoid comparing the same connection with itself or repeating comparisons already made
+            {      
+                local uid2 = last_connections[idx2];
+                local srcip2 = connection_infos[uid2]$srcip;
+                local service2 = connection_infos[uid2]$service;
+                local dstip2 = connection_infos[uid2]$dstip;
+                local dstport2 = connection_infos[uid2]$dstport;
+                local srcport2 = connection_infos[uid2]$srcport;
+
+                # Increment counters based on matching connection properties
+                if (srcip1 == srcip2 && service1 == service2)
+                    ct_srv_src += 1;
+
+                if (dstip1 == dstip2 && service1 == service2)
+                    ct_srv_dst += 1;
+
+                if (dstip1 == dstip2)
+                    ct_dst_ltm += 1;
+
+                if (srcip1 == srcip2)
+                    ct_src_ltm += 1;
+
+                if (srcip1 == srcip2 && dstport1 == dstport2)
+                    ct_src_dport_ltm += 1;
+
+                if (dstip1 == dstip2 && srcport1 == srcport2)
+                    ct_dst_sport_ltm += 1;
+
+                if (srcip1 == srcip2 && dstip1 == dstip2)
+                    ct_dst_src_ltm += 1;
+            }        
+        }
+    }
+
+    # Calculate the average TTL value per state across the last connections
+    local num_connections = |last_connections|;
+    for (state, sum in state_ttl_sums)
+    {
+        local average = sum / num_connections;
+        connection_infos[uid]$state_ttl_mean[state] = average;  # Update the average TTL value per state in connection_infos
+    }
+
+    # Assign the calculated counts to the respective fields of the current connection
+    connection_infos[uid]$ct_srv_src = ct_srv_src;
+    connection_infos[uid]$ct_srv_dst = ct_srv_dst;
+    connection_infos[uid]$ct_dst_ltm = ct_dst_ltm;
+    connection_infos[uid]$ct_src_ltm = ct_src_ltm;
+    connection_infos[uid]$ct_src_dport_ltm = ct_src_dport_ltm;
+    connection_infos[uid]$ct_dst_sport_ltm = ct_dst_sport_ltm;
+    connection_infos[uid]$ct_dst_src_ltm = ct_dst_src_ltm;
+    connection_infos[uid]$ct_flw_http_mthd = ct_flw_http_mthd;
+    connection_infos[uid]$ct_ftp_cmd = ct_ftp_cmd;
+}
+
+# Jitter is a measure of the variability in packet delay within the network. This function calculates jitter using Exponential Weighted Moving Average (EWMA).
+# The EWMA method smooths out the jitter measurement by giving more weight to the recent measurements and less to the older ones.
+function calculate_jitter(last_time: time, curr_time: time, current_jitter: double) : double
+{
+    local time_diff = interval_to_double(curr_time - last_time);  # Calculate the time difference between the current and the last packet
+    local alpha = 0.2;                                            # Smoothing factor for jitter calculation, determines the weight of recent versus older measurements
+    local abs_diff = |time_diff - current_jitter|;                # Calculate the absolute difference between the current time difference and the current jitter
+    return ((1.0 - alpha) * current_jitter) + (alpha * abs_diff); # Calculate the updated jitter using EWMA, where 'alpha' is the weight given to the recent measurement
+}
+
+# Updates jitter values for source and destination based on the arrival time of the current packet.
+function update_jitter_values(uid: string, curr_time: time, is_src: bool)
+{
+    if (is_src && connection_infos[uid]?$last_pkt_time_src) 
+        connection_infos[uid]$sjit = calculate_jitter(connection_infos[uid]$last_pkt_time_src, curr_time, connection_infos[uid]$sjit);
+    else if (!(is_src) && connection_infos[uid]?$last_pkt_time_dst) 
+        connection_infos[uid]$djit = calculate_jitter(connection_infos[uid]$last_pkt_time_dst, curr_time, connection_infos[uid]$djit);
+}
+
+# Updates the last packet timestamps for source and destination in the global connection information table.
+function update_last_packet_timestamps(uid: string, curr_time: time, is_src: bool)
+{
+    if (is_src) 
+        connection_infos[uid]$last_pkt_time_src = curr_time;  # Update the timestamp for the last source packet.
+    else 
+        connection_infos[uid]$last_pkt_time_dst = curr_time;  # Update the timestamp for the last destination packet.         
+}
+
+# Function that updates interarrival time values for a specific connection.
+function update_interarrival_time_values(uid: string, pkt_time: time, is_src: bool)
+{
+    local interarrival_time: interval;
+    # If the packet is from the source and it's not the first packet
+    if (is_src && connection_infos[uid]?$sintpkt_count && connection_infos[uid]$sintpkt_count > 0) 
+    {
+        interarrival_time = pkt_time - connection_infos[uid]$last_pkt_time_src;
+        connection_infos[uid]$sintpkt_sum += interarrival_time;
+        connection_infos[uid]$sintpkt_count += 1;
+    }
+    # If the packet is from the destination and it's not the first packet
+    else if (!(is_src) && connection_infos[uid]?$dintpkt_count && connection_infos[uid]$dintpkt_count > 0) 
+    {
+        interarrival_time = pkt_time - connection_infos[uid]$last_pkt_time_dst;
+        connection_infos[uid]$dintpkt_sum += interarrival_time;
+        connection_infos[uid]$dintpkt_count += 1;
+    }
+}    
+
+# Function to calculate average interarrival time
+function average_interarrival_time(interarrival_sum: interval, packet_count: count) : double
+{
+    # If there are packets, calculate the average interarrival time
+    if (packet_count > 0) 
+        return interval_to_double(interarrival_sum) / count_to_double(packet_count);
+    else
+        return 0.0;  # If there are no packets, return 0.0
+}
+
+# EVENT HANDLERS SECTION
+
+event zeek_init() 
+{
+    Log::create_stream(LOG_UNSW_NB15, [$columns=Info, $path="unsw-nb15"]);
+}
+
+# Event generated for every new connection
+event new_connection(c: connection)             
+{ 
+    local uid = c$uid;
+    
+    if (!check_uid(uid))
+        connection_infos[uid] = Info();         # Create a new Info record for the uid.
+
+    extract_basic_info(uid,c);
+}
+
+# Event generated for all packets that make it into Zeek’s connection processing.
+event new_packet(c: connection, p: pkt_hdr)
+{
+    local uid = c$uid;
+    local curr_time = network_time();  # Timestamp of the new packet
+    local ttl: count;
+    local is_src = is_source(p, c);
+    
+    if (check_uid(uid))
+    {
+        # Update of the table state_ttl_stats and extract source/destination TTL (sttl, dttl)
+        if (p$ip?$ttl)
+        {
+            ttl = p$ip$ttl;
+
+            if (connection_infos[uid]?$state)
+            {
+                update_ttl_stats(connection_infos[uid]$state, ttl, uid);
+                local state = connection_infos[uid]$state;
+
+                # Calculate the tolerance threshold based on the average TTL for the current state
+                if (state in connection_infos[uid]$state_ttl_mean)
+                {
+                    local avg_ttl = connection_infos[uid]$state_ttl_mean[state];
+                    local lower_bound = avg_ttl * (1.0 - TOLERANCE_THRESHOLD_PERCENTAGE / 100.0);
+                    local upper_bound = avg_ttl * (1.0 + TOLERANCE_THRESHOLD_PERCENTAGE / 100.0);
+
+                    # Increment ct_state_ttl if the packet's TTL falls outside the tolerance range
+                    if (ttl < lower_bound || ttl > upper_bound)
+                        connection_infos[uid]$ct_state_ttl += 1;
+                }
+            }
+
+            # Update the TTL values in connection_infos
+            if (is_src)
+                connection_infos[uid]$sttl = ttl;
+            else
+                connection_infos[uid]$dttl = ttl;
+        }
+
+        # Update common packet info as window size and sequence number (swin, dwin, stcpb, dtcpb)
+        update_packet_features(uid, p, is_src);       
+
+        # Update jitter values for packets from source/destination endpoints of the uid connection
+        update_jitter_values(uid, curr_time, is_src);
+        
+        # Update interarrival time values for the uid connection
+        update_interarrival_time_values(uid, curr_time, is_src);
+        
+        # Update the timestamp of the last packet
+        update_last_packet_timestamps(uid, curr_time, is_src);     
+    }    
+}
+
+# Event generated for every TCP packet. 
+event tcp_packet(c: connection, is_orig: bool, flags: string, seq: count, ack: count, len: count, payload: string)  
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+        update_tcp_state(uid, flags);  
+}
+
+# Event generated for each packet sent by a UDP flow’s originator
+event udp_request(c: connection)    
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+        update_udp_state(uid, T);  
+        
+}
+
+# Event generated for each packet sent by a UDP flow’s responder
+event udp_reply(c: connection)      
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+        update_udp_state(uid, F);  
+}
+
+# Eevent generated when a TCP connection terminated, passing on statistics about the two endpoints in a TCP connection:
+# os: originator - rs: responder 
+event conn_stats(c: connection, os: endpoint_stats, rs: endpoint_stats)
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+    {	
+        connection_infos[uid]$sloss = os$num_rxmit;	# num_rxmit: number of retransmissions.
+        connection_infos[uid]$dloss = rs$num_rxmit;	
+    }	
+}
+
+# Event generated for each SYN packet. Zeek raises this event for every SYN packet seen by its TCP analyzer.
+event connection_SYN_packet(c: connection, pkt: SYN_packet)	
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+    {
+        if (pkt$is_orig)                                           # Check if the packet is from the originator
+            connection_infos[uid]$syn_timestamp = network_time();  # Store the timestamp of the SYN packet
+    }
+}
+
+# Event generated when seeing a SYN-ACK packet from the responder in a TCP handshake.
+event connection_established(c: connection)	
+{
+    local uid = c$uid;
+    if (check_uid(uid))   
+    {
+        connection_infos[uid]$synack_timestamp = network_time();	    # Store the timestamp of SYN/ACK
+        if (connection_infos[uid]?$syn_timestamp)                       # Check if SYN timestamp is valid
+            # Calculate synack
+            connection_infos[uid]$synack = interval_to_double(connection_infos[uid]$synack_timestamp - connection_infos[uid]$syn_timestamp);  
+    } 
+}
+
+# Event generated for the first ACK packet seen for a TCP connection from its originator.
+event connection_first_ACK(c: connection)	
+{
+    local uid = c$uid;
+    if (check_uid(uid) && (connection_infos[uid]?$synack_timestamp)) # Check if SYN/ACK timestamp is valid
+    {
+        # Calculate ackdat
+        connection_infos[uid]$ackdat = interval_to_double(network_time() - connection_infos[uid]$synack_timestamp);
+        # Calculate tcprtt  
+        connection_infos[uid]$tcprtt = connection_infos[uid]$synack + connection_infos[uid]$ackdat;  
+    }     
+}
+
+# Event generated for client-side FTP commands.
+event ftp_request(c: connection, command: string, arg: string)
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+        connection_infos[uid]$ftp_cmd += 1;			# Increment the counter for each detected FTP command.
+}
+
+# Event generated for server-side FTP replies
+event ftp_reply(c: connection, code: count, msg: string, cont_resp: bool)
+{
+    local uid = c$uid;
+    if (check_uid(uid) && (code == 230))    # Check if the server's response code indicates a successful login (230: User logged in, proceed)	
+        connection_infos[uid]$is_ftp_login = T;
+}
+
+# Event generated for HTTP requests
+event http_request(c: connection, method: string, original_URI: string, unescaped_URI: string, version: string) 
+{
+    local uid = c$uid;
+    if (check_uid(uid) && (method == "GET" || method == "POST"))    # Check if the service is HTTP and the method is either GET or POST. 
+        connection_infos[uid]$flw_http_mthd += 1;	# Increment the counter for the flow in the global data structure.
+}   
+ 
+# Event generated when a connection’s internal state is about to be removed from memory, not only for TCP sessions but also for UDP and ICMP flows.
+event connection_state_remove(c: connection) 
+{
+    local uid = c$uid;
+    if (check_uid(uid))
+    {	
+        # extract transport protocol (dato presente nel record "conn" non disponibile al momento dell'evento new_connection)
+        connection_infos[uid]$proto = c$conn$proto;	
+
+        # extract service type    
+        if (c$conn?$service)
+            connection_infos[uid]$service = c$conn$service;
+        else
+            connection_infos[uid]$service = " - ";
+
+        # Capture the last moment the connection was processed (ltime) 
+	    connection_infos[uid]$ltime = network_time();     
+        # update the queue of the last MAX_RECENT_CONNECTION and calculate the features that involves them.
+        calculate_connection_features(uid);
+
+        # Extract duration (dur). Zeek's handling of connection duration excludes trailing non-productive TCP packets, like the final ACK.  
+	    connection_infos[uid]$dur = interval_to_double(c$duration);
+
+        # Extract sbytes, dbytes, sload, dload, spkts, dpkts	
+	    connection_infos[uid]$sbytes = c$orig$num_bytes_ip;
+	    connection_infos[uid]$dbytes = c$resp$num_bytes_ip;
+	    connection_infos[uid]$sload = c$orig$num_bytes_ip * 8 / interval_to_double(c$duration);	 # Calculate the load and packet counts
+	    connection_infos[uid]$dload = c$resp$num_bytes_ip * 8 / interval_to_double(c$duration);
+	    connection_infos[uid]$spkts = c$orig$num_pkts;
+	    connection_infos[uid]$dpkts = c$resp$num_pkts;
+
+        # Calculate smeansz, dmeansz
+  	    if (c$orig$num_pkts > 0)	 # Calculate the mean packet size 
+	        connection_infos[uid]$smeansz = (c$orig$num_bytes_ip / c$orig$num_pkts); 	# c$orig$num_bytes_ip: number of IP-level bytes sent by source - c$orig$num_pkts: number of packets sent by source   
+	    if (c$resp$num_pkts > 0)   
+	        connection_infos[uid]$dmeansz = (c$resp$num_bytes_ip / c$resp$num_pkts);	# c$resp$num_bytes_ip: number of IP-level bytes sent by destination - c$resp$num_pkts: number of packets sent by destination   
+        
+        # Extract HTTP transaction depth (trans_depth) and response body length (res_bdy_len)
+	    if (c?$http)	 
+	    {	
+	        connection_infos[uid]$trans_depth = c$http$trans_depth;		# c$http$trans_depth: represents the pipelined depth into the connection of this request/response transaction.
+	        connection_infos[uid]$res_bdy_len = c$http$response_body_len;	# c$http$response_body_len: actual uncompressed content size of the data transferred from the server.
+	    }
+        
+        # Calculate source interpacket arrival time (sintpkt)
+    	if (connection_infos[uid]?$sintpkt && connection_infos[uid]?$sintpkt_count && connection_infos[uid]?$sintpkt_sum) 
+            connection_infos[uid]$sintpkt = average_interarrival_time(connection_infos[uid]$sintpkt_sum, connection_infos[uid]$sintpkt_count);
+        # Calculate destination interpacket arrival time (dintpkt)
+        if (connection_infos[uid]?$dintpkt && connection_infos[uid]?$dintpkt_count && connection_infos[uid]?$dintpkt_sum)    
+	        connection_infos[uid]$dintpkt = average_interarrival_time(connection_infos[uid]$dintpkt_sum, connection_infos[uid]$dintpkt_count);
+
+        # Check if source equals to destination IP addresses and port numbers are equal
+        connection_infos[uid]$is_sm_ips_ports = (connection_infos[uid]$srcip == connection_infos[uid]$dstip && connection_infos[uid]$srcport == connection_infos[uid]$dstport) ? T : F;
+    }  
+ 
+    Log::write(LOG_UNSW_NB15, connection_infos[uid]);
+}
+
+
+
+
